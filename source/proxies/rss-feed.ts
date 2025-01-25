@@ -4,13 +4,14 @@ import { Feed } from '../types/feed';
 import { Subscribe } from '../types/subscribe';
 import { isSome, Option, Optional, Some } from '../types/option';
 import { decodeUrl } from '../utils/urlencode';
+import arrayShuffle from '../utils/shuffle';
 
 export async function sub(
     userId: number,
     feedUrl: string,
     feedTitle: string,
     ttl = 0
-): Promise<string> {
+): Promise<'ok'> {
     feedUrl = decodeUrl(feedUrl);
     const feed = await db<Feed>('rss_feed').where('url', feedUrl).first();
     if (feed) {
@@ -31,18 +32,26 @@ export async function sub(
             throw errors.newCtrlErr('ALREADY_SUB');
         }
     } else {
-        const [feed_id] = await db('rss_feed').insert(
-            {
-                url: feedUrl,
-                feed_title: feedTitle,
-                ttl: ttl
-            },
-            'feed_id'
-        );
-        await db('subscribes').insert(
-            { feed_id, user_id: userId },
-            'subscribe_id'
-        );
+        await db.transaction(async (trx) => {
+            let [feed_id] = await db('rss_feed')
+                .insert(
+                    {
+                        url: feedUrl,
+                        feed_title: feedTitle,
+                        ttl: ttl
+                    },
+                    'feed_id'
+                )
+                .returning('feed_id')
+                .transacting(trx);
+            if (typeof feed_id === 'object') {
+                feed_id = feed_id.feed_id; // pg return object
+            }
+            await db('subscribes')
+                .insert({ feed_id, user_id: userId }, 'subscribe_id')
+                .transacting(trx);
+        });
+
         return 'ok';
     }
 }
@@ -91,7 +100,8 @@ export async function getAllFeeds(ttl = true): Promise<Feed[]> {
         if (ttl) {
             query = query.where('next_fetch_time', '<', db.fn.now());
         }
-        const feeds = await query.orderByRaw('random()').select();
+        const feeds = await query.select();
+        arrayShuffle(feeds);
 
         return feeds;
     } catch (e) {
